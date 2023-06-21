@@ -6,7 +6,7 @@ import type { AdapterSession, AdapterUser } from "../../adapters"
 import type { JWT } from "../../jwt"
 import type { Account, User } from "../.."
 import type { SessionToken } from "./cookie"
-import { OAuthConfig } from "src/providers"
+import { OAuthConfig, PasswordAdapterUser } from "src/providers"
 
 /**
  * This function handles the complex flow of signing users in, and either creating,
@@ -22,7 +22,7 @@ import { OAuthConfig } from "src/providers"
  */
 export default async function callbackHandler(params: {
   sessionToken?: SessionToken
-  profile: User | AdapterUser | { email: string }
+  profile: User | AdapterUser | { email: string } | PasswordAdapterUser
   account: Account | null
   options: InternalOptions
 }) {
@@ -30,7 +30,7 @@ export default async function callbackHandler(params: {
   // Input validation
   if (!account?.providerAccountId || !account.type)
     throw new Error("Missing or invalid provider account")
-  if (!["email", "oauth"].includes(account.type))
+  if (!["email", "oauth", "password"].includes(account.type))
     throw new Error("Provider not supported")
 
   const {
@@ -61,7 +61,7 @@ export default async function callbackHandler(params: {
   } = adapter
 
   let session: AdapterSession | JWT | null = null
-  let user: AdapterUser | null = null
+  let user: AdapterUser | PasswordAdapterUser | null = null
   let isNewUser = false
 
   const useJwtSession = sessionStrategy === "jwt"
@@ -223,6 +223,48 @@ export default async function callbackHandler(params: {
 
       return { session, user, isNewUser: true }
     }
+  } else if (account.type === "password") {
+    // If signing in with a password, check if an account with the same email address exists already
+    // Note that it's possible to use password authentication with a username or id and for
+    // email addresses to be completely disregarded by this provider type
+    const userByEmail = profile.email
+      ? await getUserByEmail(profile.email)
+      : null
+
+    if (userByEmail) {
+      // If they are not already signed in as the same user, this flow will
+      // sign them out of the current session and sign them in as the new user
+      if (user?.id !== userByEmail.id && !useJwtSession && sessionToken) {
+        // Delete existing session if they are currently signed in as another user.
+        // This will switch user accounts for the session in cases where the user was
+        // already logged in with a different account.
+        await deleteSession(sessionToken)
+      }
+
+      // Update emailVerified property on the user object
+      user = await updateUser({
+        id: userByEmail.id,
+        emailVerified: new Date(),
+      })
+      await events.updateUser?.({ user })
+    } else {
+      const { id: _, ...newUser } = { ...profile, emailVerified: new Date() }
+      // Create user account if there isn't one for the email address already
+      user = await createUser(newUser)
+      await events.createUser?.({ user })
+      isNewUser = true
+    }
+
+    // Create new session
+    session = useJwtSession
+      ? {}
+      : await createSession({
+          sessionToken: await generateSessionToken(),
+          userId: user.id,
+          expires: fromDate(options.session.maxAge),
+        })
+
+    return { session, user, isNewUser }
   }
 
   throw new Error("Unsupported account type")

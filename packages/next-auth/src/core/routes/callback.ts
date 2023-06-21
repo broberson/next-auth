@@ -8,6 +8,7 @@ import type { RequestInternal, ResponseInternal } from ".."
 import type { Cookie, SessionStore } from "../lib/cookie"
 import type { User } from "../.."
 import type { AdapterSession } from "../../adapters"
+import { PasswordAdapterUser, PasswordRecord } from "src/providers"
 
 /** Handle callbacks from login services */
 export default async function callback(params: {
@@ -34,7 +35,6 @@ export default async function callback(params: {
   } = options
 
   const cookies: Cookie[] = []
-
   const useJwtSession = sessionStrategy === "jwt"
 
   if (provider.type === "oauth") {
@@ -415,7 +415,263 @@ export default async function callback(params: {
     await events.signIn?.({ user, account })
 
     return { redirect: callbackUrl, cookies }
+  } else if (provider.type === "password" && method === "GET") {
+    // GET method is called when email verification links are
+    // clicked. Sign In attempts will be POSTs.
+    try {
+      const credentialKeys = Object.keys(provider.credentials)
+      const supportEmailVerification =
+        provider.emailVerificationEnabled && credentialKeys.includes("email")
+
+      if (!supportEmailVerification) {
+        return { redirect: `${url}/error?error=configuration`, cookies }
+      }
+
+      const token = query?.token as string | undefined
+      const identifier = query?.email as string | undefined
+
+      // If these are missing, the sign-in URL was manually opened without these params or the `sendVerificationRequest` method did not send the link correctly in the email.
+      if (!token || !identifier) {
+        return { redirect: `${url}/error?error=configuration`, cookies }
+      }
+
+      // @ts-expect-error -- Verified in `assertConfig`. adapter: Adapter<true>
+      const invite = await adapter.useVerificationToken({
+        identifier,
+        token: hashToken(token, options),
+      })
+
+      const invalidInvite = !invite || invite.expires.valueOf() < Date.now()
+      if (invalidInvite) {
+        return { redirect: `${url}/error?error=Verification`, cookies }
+      }
+
+      const profile = (await getAdapterUserFromEmail({
+        email: identifier,
+        // @ts-expect-error -- Verified in `assertConfig`. adapter: Adapter<true>
+        adapter,
+      })) as PasswordAdapterUser
+
+      const providerAccountIdField = provider.identifier
+      const account = {
+        providerAccountId: profile[providerAccountIdField],
+        type: "password" as const,
+        provider: provider.id,
+      }
+
+      // Check if user is allowed to sign in
+      try {
+        const signInCallbackResponse = await callbacks.signIn({
+          user: profile,
+          account,
+        })
+        if (!signInCallbackResponse) {
+          return { redirect: `${url}/error?error=AccessDenied`, cookies }
+        } else if (typeof signInCallbackResponse === "string") {
+          return { redirect: signInCallbackResponse, cookies }
+        }
+      } catch (error) {
+        return {
+          redirect: `${url}/error?error=${encodeURIComponent(
+            (error as Error).message
+          )}`,
+          cookies,
+        }
+      }
+
+      // Sign user in
+      const { user, session, isNewUser } = await callbackHandler({
+        sessionToken: sessionStore.value,
+        profile,
+        account,
+        options,
+      })
+
+      if (useJwtSession) {
+        const defaultToken = {
+          name: user.name,
+          email: user.email,
+          picture: user.image,
+          sub: user.id?.toString(),
+        }
+        const token = await callbacks.jwt({
+          token: defaultToken,
+          user,
+          account,
+          isNewUser,
+          trigger: isNewUser ? "signUp" : "signIn",
+        })
+
+        // Encode token
+        const newToken = await jwt.encode({ ...jwt, token })
+
+        // Set cookie expiry date
+        const cookieExpires = new Date()
+        cookieExpires.setTime(cookieExpires.getTime() + sessionMaxAge * 1000)
+
+        const sessionCookies = sessionStore.chunk(newToken, {
+          expires: cookieExpires,
+        })
+        cookies.push(...sessionCookies)
+      } else {
+        // Save Session Token in cookie
+        cookies.push({
+          name: options.cookies.sessionToken.name,
+          value: (session as AdapterSession).sessionToken,
+          options: {
+            ...options.cookies.sessionToken.options,
+            expires: (session as AdapterSession).expires,
+          },
+        })
+      }
+
+      await events.signIn?.({ user, account, isNewUser })
+
+      // Handle first logins on new accounts
+      // e.g. option to send users to a new account landing page on initial login
+      // Note that the callback URL is preserved, so the journey can still be resumed
+      if (isNewUser && pages.newUser) {
+        return {
+          redirect: `${pages.newUser}${
+            pages.newUser.includes("?") ? "&" : "?"
+          }callbackUrl=${encodeURIComponent(callbackUrl)}`,
+          cookies,
+        }
+      }
+
+      // Callback URL is already verified at this point, so safe to use if specified
+      return { redirect: callbackUrl, cookies }
+    } catch (error) {
+      if ((error as Error).name === "CreateUserError") {
+        return { redirect: `${url}/error?error=VerifyEmailAddress`, cookies }
+      }
+      logger.error("CALLBACK_EMAIL_VERIFICATION_ERROR", error as Error)
+      return { redirect: `${url}/error?error=Callback`, cookies }
+    }
+  } else if (provider.type === "password" && method === "POST") {
+    const credentials = body
+
+    if (!provider.authorize) {
+      return { redirect: `${url}/error?error=configuration`, cookies }
+    }
+
+    let user: User | null
+    try {
+      user = await provider.authorize(
+        credentials,
+        {
+          query,
+          body,
+          headers,
+          method,
+        },
+        options
+      )
+      if (!user) {
+        return {
+          status: 401,
+          redirect: `${url}/error?${new URLSearchParams({
+            error: "PasswordSignin",
+            provider: provider.id,
+          })}`,
+          cookies,
+        }
+      }
+    } catch (error) {
+      return {
+        status: 401,
+        redirect: `${url}/error?error=${encodeURIComponent(
+          (error as Error).message
+        )}`,
+        cookies,
+      }
+    }
+
+    const providerAccountIdField = provider.identifier
+    /** @type {import("src").Account} */
+    const account = {
+      providerAccountId: user[providerAccountIdField],
+      type: "password" as const,
+      provider: provider.id,
+    }
+
+    try {
+      const isAllowed = await callbacks.signIn({
+        user,
+        account,
+        password: credentials as PasswordRecord,
+      })
+      if (!isAllowed) {
+        return {
+          status: 403,
+          redirect: `${url}/error?error=AccessDenied`,
+          cookies,
+        }
+      } else if (typeof isAllowed === "string") {
+        return { redirect: isAllowed, cookies }
+      }
+    } catch (error) {
+      return {
+        redirect: `${url}/error?error=${encodeURIComponent(
+          (error as Error).message
+        )}`,
+        cookies,
+      }
+    }
+
+    // Sign user in
+    const { session, isNewUser } = await callbackHandler({
+      sessionToken: sessionStore.value,
+      profile: user,
+      account,
+      options,
+    })
+
+    if (useJwtSession) {
+      const defaultToken = {
+        name: user.name,
+        email: user.email,
+        picture: user.image,
+        sub: user.id?.toString(),
+      }
+
+      const token = await callbacks.jwt({
+        token: defaultToken,
+        user,
+        account,
+        isNewUser: false,
+        trigger: "signIn",
+      })
+
+      // Encode token
+      const newToken = await jwt.encode({ ...jwt, token })
+
+      // Set cookie expiry date
+      const cookieExpires = new Date()
+      cookieExpires.setTime(cookieExpires.getTime() + sessionMaxAge * 1000)
+
+      const sessionCookies = sessionStore.chunk(newToken, {
+        expires: cookieExpires,
+      })
+
+      cookies.push(...sessionCookies)
+    } else {
+      // Save Session Token in cookie
+      cookies.push({
+        name: options.cookies.sessionToken.name,
+        value: (session as AdapterSession).sessionToken,
+        options: {
+          ...options.cookies.sessionToken.options,
+          expires: (session as AdapterSession).expires,
+        },
+      })
+    }
+
+    await events.signIn?.({ user, account })
+
+    return { redirect: callbackUrl, cookies }
   }
+
   return {
     status: 500,
     body: `Error: Callback for provider type ${provider.type} not supported`,

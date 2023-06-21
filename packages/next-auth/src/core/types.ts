@@ -9,6 +9,8 @@ import type {
   AuthorizationEndpointHandler,
   TokenEndpointHandler,
   UserinfoEndpointHandler,
+  PasswordRecord,
+  PasswordAdapterUser,
 } from "../providers"
 import type { TokenSetParameters } from "openid-client"
 import type { JWT, JWTOptions } from "../jwt"
@@ -18,6 +20,7 @@ import type { CookieSerializeOptions } from "cookie"
 import type { NextApiRequest, NextApiResponse } from "next"
 
 import type { InternalUrl } from "../utils/parse-url"
+import { PasswordConfig } from "src/providers/password"
 
 export type Awaitable<T> = T | PromiseLike<T>
 
@@ -266,7 +269,7 @@ export interface CallbacksOptions<P = Profile, A = Account> {
    * [Documentation](https://next-auth.js.org/configuration/callbacks#sign-in-callback)
    */
   signIn: (params: {
-    user: User | AdapterUser
+    user: User | AdapterUser | PasswordAdapterUser
     account: A | null
     /**
      * If OAuth provider is used, it contains the full
@@ -286,6 +289,8 @@ export interface CallbacksOptions<P = Profile, A = Account> {
     }
     /** If Credentials provider is used, it contains the user credentials */
     credentials?: Record<string, CredentialInput>
+    /** If Password provider is used, it contains the user credentials */
+    password?: PasswordRecord
   }) => Awaitable<string | boolean>
   /**
    * This callback is called anytime the user is redirected to a callback URL (e.g. on signin or signout).
@@ -443,9 +448,9 @@ export interface EventCallbacks {
   createUser: (message: { user: User }) => Awaitable<void>
   updateUser: (message: { user: User }) => Awaitable<void>
   linkAccount: (message: {
-    user: User | AdapterUser
+    user: User | AdapterUser | PasswordAdapterUser
     account: Account
-    profile: User | AdapterUser
+    profile: User | AdapterUser | PasswordAdapterUser
   }) => Awaitable<void>
   /**
    * The message object will contain one of these depending on
@@ -564,6 +569,8 @@ export type InternalProvider<T = ProviderType> = (T extends "oauth"
   ? EmailConfig
   : T extends "credentials"
   ? CredentialsConfig
+  : T extends "password"
+  ? PasswordConfig
   : never) & {
   signinUrl: string
   callbackUrl: string
@@ -583,7 +590,9 @@ export type AuthAction =
 /** @internal */
 export interface InternalOptions<
   TProviderType = ProviderType,
-  WithVerificationToken = TProviderType extends "email" ? true : false
+  WithVerificationToken = TProviderType extends "email" | "password"
+    ? true
+    : false
 > {
   providers: InternalProvider[]
   /**

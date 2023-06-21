@@ -13,7 +13,10 @@ export function fromDate(time: number, date = Date.now()) {
   return new Date(date + time * 1000)
 }
 
-export function hashToken(token: string, options: InternalOptions<"email">) {
+export function hashToken(
+  token: string,
+  options: InternalOptions<"email"> | InternalOptions<"password">
+) {
   const { provider, secret } = options
   return (
     createHash("sha256")

@@ -11,8 +11,9 @@ import type {
 export * from "./oauth"
 export * from "./email"
 export * from "./credentials"
+export * from "./password"
 
-export type ProviderType = "oauth" | "email" | "credentials"
+export type ProviderType = "oauth" | "email" | "credentials" | "password"
 
 export interface CommonProviderOptions {
   id: string
@@ -36,6 +37,6 @@ export interface AppProvider extends CommonProviderOptions {
   callbackUrl: string
 }
 
-export type RedirectableProviderType = "email" | "credentials"
+export type RedirectableProviderType = "email" | "credentials" | "password"
 
 export type BuiltInProviderType = RedirectableProviderType | OAuthProviderType

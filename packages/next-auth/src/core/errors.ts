@@ -72,6 +72,11 @@ export class InvalidCallbackUrl extends UnknownError {
   code = "INVALID_CALLBACK_URL_ERROR"
 }
 
+export class EmailNotVerified extends UnknownError {
+  name = "EmailNotVerified"
+  code = "EMAIL_NOT_VERIFIED_ERROR"
+}
+
 type Method = (...args: any[]) => Promise<any>
 
 export function upperSnake(s: string) {

@@ -2,6 +2,7 @@ import renderToString from "preact-render-to-string"
 import SigninPage from "./signin"
 import SignoutPage from "./signout"
 import VerifyRequestPage from "./verify-request"
+import VerifyEmailPage from "./verify-email"
 import ErrorPage from "./error"
 import css from "../../css"
 
@@ -67,6 +68,12 @@ export default function renderPage(params: RenderPageParams) {
       return send({
         html: VerifyRequestPage({ url, theme, ...props }),
         title: "Verify Request",
+      })
+    },
+    verifyEmail(props?: any) {
+      return send({
+        html: VerifyEmailPage({ url, theme, ...props }),
+        title: "Verify Email",
       })
     },
     error(props?: { error?: ErrorType }) {
